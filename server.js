@@ -1,18 +1,26 @@
-require('dotenv').config();
-const { Telegraf } = require('telegraf');
-const speech = require('@google-cloud/speech');
-const fs = require('fs');
-const axios = require('axios');
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+import dotenv from 'dotenv';
+dotenv.config();
+import { Telegraf } from 'telegraf';
+import speech from '@google-cloud/speech';
+import fs from 'fs';
+import path from "path";
+import axios from 'axios';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import OpenAI from 'openai';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-require('dotenv').config(); // make sure to install the dotenv package
-
 const keyFilename = process.env.TEXT_TO_SPEECH_FILE_PATH; // path to your JSON key file
-
 // Creates a client
 const googleClient = new speech.SpeechClient({ keyFilename });
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY, // defaults to process.env["OPENAI_API_KEY"]
+  });
+  
+const conversationContexts = new Map();
+const speechFile = path.resolve("./speech.mp3");
+var wasAudio = false;
+
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -45,6 +53,67 @@ async function downloadAndConvertVoiceToWAV(fileUrl, originalPath, outputPath) {
     writer.on('error', reject);
   });
 }
+async function getOpenAITextResponse(userId, message) {
+    // Retrieve the conversation context
+    const conversation = conversationContexts.get(userId) || [];
+  
+    // Add the new message to the conversation history
+    conversation.push({ role: 'user', content: message });
+  
+    // Generate a response using OpenAI API
+    const chatCompletion = await openai.chat.completions.create({
+      messages: conversation,
+      model: 'gpt-4-1106-preview',
+    });
+    console.log(chatCompletion.usage);
+  
+    // Get the GPT response and add it to the conversation history
+    const gptResponse = chatCompletion.choices[0].message.content;
+    // Log the token usage (if available in the headers)
+
+    conversation.push({ role: 'assistant', content: gptResponse });
+  
+    // Save the updated conversation context
+    conversationContexts.set(userId, conversation);
+  
+    // Return the GPT response
+    return gptResponse;
+  }
+
+  async function getOpenAIAudioResponse(userId, message) {
+    // Retrieve the conversation context
+    const conversation = conversationContexts.get(userId) || [];
+  
+    // Add the new message to the conversation history
+    conversation.push({ role: 'user', content: message });
+  
+    // Generate a response using OpenAI API
+    const chatCompletion = await openai.chat.completions.create({
+      messages: conversation,
+      model: 'gpt-4-1106-preview',
+    });
+    console.log(chatCompletion.usage);
+  
+    // Get the GPT response and add it to the conversation history
+    const gptResponse = chatCompletion.choices[0].message.content;
+    // Log the token usage (if available in the headers)
+
+    const mp3 = await openai.audio.speech.create({
+        model: "tts-1",
+        voice: "echo",
+        input: gptResponse,
+      });
+    console.log(speechFile);
+    const buffer = Buffer.from(await mp3.arrayBuffer());
+    await fs.promises.writeFile(speechFile, buffer);
+
+
+    conversation.push({ role: 'assistant', content: gptResponse });
+
+  
+    // Return the GPT response
+    return speechFile;
+  }
 
 // Helper function to perform speech-to-text transcription
 async function transcribeAudio(filePath) {
@@ -58,7 +127,7 @@ async function transcribeAudio(filePath) {
     const config = {
       encoding: 'LINEAR16',
       sampleRateHertz: 48000, // The sample rate in Hertz
-      languageCode: 'en-US', // The language of the supplied audio
+      languageCode: 'en-US'
     };
   
     const request = {
@@ -79,6 +148,7 @@ async function transcribeAudio(filePath) {
 // Update the bot.on('voice', ...) event handler
 bot.on('voice', async (ctx) => {
   try {
+    wasAudio = true;
     const fileId = ctx.message.voice.file_id;
     const fileData = await ctx.telegram.getFile(fileId);
     const filePath = fileData.file_path;
@@ -91,20 +161,36 @@ bot.on('voice', async (ctx) => {
 
     // Transcribe the audio file to text
     const transcription = await transcribeAudio(outputPath);
-    console.log('Transcription: ', transcription);
+    
+    await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_voice');
+    const response = await getOpenAIAudioResponse(ctx.message.from.id, transcription);
 
-    // Send the transcription back to the user
-    await ctx.reply(`Transcription: ${transcription}`);
+    await ctx.telegram.sendVoice(ctx.message.chat.id, { source: speechFile });
 
     // Cleanup: delete the local files after processing
     fs.unlinkSync(originalPath);
     fs.unlinkSync(outputPath);
-
+    fs.unlinkSync(speechFile); // Make sure to also delete the generated audio file
   } catch (error) {
     console.error(error);
     ctx.reply('I encountered an error while processing your message.');
   }
 });
+
+// Function to handle text messages
+bot.on('text', async (ctx) => {
+    wasAudio = false;
+    const userId = ctx.message.from.id;
+    const message = ctx.message.text;
+    await ctx.telegram.sendChatAction(ctx.chat.id, 'typing');
+
+  
+    // Get response from GPT-3
+    const response = await getOpenAITextResponse(userId, message);
+  
+    // Send the response back to the user
+    await ctx.reply(response);
+  });
 
 
 // Start polling
