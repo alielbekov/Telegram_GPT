@@ -127,7 +127,7 @@ async function transcribeAudio(filePath) {
     const config = {
       encoding: 'LINEAR16',
       sampleRateHertz: 48000, // The sample rate in Hertz
-      languageCode: 'en-US'
+      languageCode: 'ru-RU'
     };
   
     const request = {
